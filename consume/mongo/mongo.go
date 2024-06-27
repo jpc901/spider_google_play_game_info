@@ -13,7 +13,7 @@ var MongoDBClient *mongo.Client
 func Init() error {
 	var err error
 	// 设置客户端连接配置
-	clientOptions := options.Client().ApplyURI("mongodb://192.168.2.188:27017")
+	clientOptions := options.Client().ApplyURI("mongodb://127.0.0.1:27017")
 	// 连接到MongoDB
 	MongoDBClient, err = mongo.Connect(context.TODO(), clientOptions)
 	if err != nil {

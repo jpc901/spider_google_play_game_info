@@ -1,16 +1,22 @@
 import re
+import os.path
 import socket
 import requests
 import json
+import threading
 from confluent_kafka import Producer
 from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 
 header = {'User-Agent': 'Mozilla/5.0 (compatible; Baiduspider-render/2.0; +http://www.baidu.com/search/spider.html)'}
+download_header = { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/605.1.15      (KHTML, like Gecko) Version/13.1 Safari/605.1.15' }
 google_base_url = "https://play.google.com"
 google_play_game_url = 'https://play.google.com/store/games'
 apk_base_url = "https://d.apkpure.com/b/APK/"
+apk_path = "./apk"
 count = 0
+download_times = 1
+download_threads = []
 s = requests.Session()
 s.mount('http://', HTTPAdapter(max_retries=3))
 s.mount('https://', HTTPAdapter(max_retries=3))
@@ -44,13 +50,14 @@ def send_msg(message):
     # 确保所有消息都被发送
     producer.flush()
 
-# 观察出来了url规律，应该没啥问题
 def get_apk_url(pkg_name):
     return apk_base_url + pkg_name + "?version=latest"
 
 
 def get_gameinfo(game_url, pkg_name):
     global count
+    global download_times
+    global download_threads
     try:
         r = s.get(game_url, headers=header,proxies=proxys)
         # 游戏详情的响应
@@ -78,6 +85,11 @@ def get_gameinfo(game_url, pkg_name):
         apk_url = get_apk_url(pkg_name)
         gameinfo["apk_url"] = apk_url
         count += 1
+        if download_times > 0:
+            t = threading.Thread(target=download_apk,args=(apk_url,game_name))
+            t.start()
+            download_threads.append(t)
+            download_times -= 1
     except Exception as e:
         print(e)
 
@@ -85,6 +97,14 @@ def get_gameinfo(game_url, pkg_name):
     json_gameinfo = json.dumps(gameinfo, ensure_ascii=False, indent=4)
     send_msg(json_gameinfo)
     
+def download_apk(download_url,apk_name):
+    r = s.get(url=download_url, headers=download_header,proxies=proxys)
+
+    f_path = os.path.join(apk_path,apk_name+".apk")
+
+    with open(f_path, 'wb') as writer:
+        writer.write(r.content)
+
 
 if __name__ == '__main__':
     # 爬取google play中游戏url、id
@@ -105,4 +125,7 @@ if __name__ == '__main__':
         print(f"开始爬取,url:{game_detail_url} ,apk包名:{pkg_name}")
         # 通过游戏url查询详情获取gameinfo
         get_gameinfo(game_detail_url, pkg_name)
+
+    for t in download_threads:
+        t.join()
     print(f"共{count}条数据")

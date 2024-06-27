@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"t/mongo"
 	"t/postgre"
 
@@ -22,20 +23,21 @@ type GameInfo struct {
 	ApkUrl        string             `json:"apk_url" bson:"apk_url"`
 }
 
-func storeMongoDB(gameInfo *GameInfo) {
+func storeMongoDB(gameInfo *GameInfo) error {
 	// 指定获取要操作的数据集
 	collection := mongo.MongoDBClient.Database("spider").Collection("game_info")
 
 	insertResult, err := collection.InsertOne(context.TODO(), *gameInfo)
 	if err != nil {
 		log.Println("insert gameinfo to mongo failed, err:", err)
-		return
+		return err
 	}
 
 	fmt.Println("Inserted a single document: ", insertResult.InsertedID)
+	return nil
 }
 
-func storePostgre(gameInfo *GameInfo) {
+func storePostgre(gameInfo *GameInfo) error {
 	// 插入数据的SQL语句
 	sqlStatement := `
     INSERT INTO game_info (name, avatar, company, download_times, description, apk_url)
@@ -47,26 +49,31 @@ func storePostgre(gameInfo *GameInfo) {
 	err := postgre.PostgreDB.QueryRow(sqlStatement, gameInfo.Name, gameInfo.Avatar, gameInfo.Company, gameInfo.DownloadTimes, gameInfo.Description, gameInfo.ApkUrl).Scan(&id)
 	if err != nil {
 		log.Println("insert gameinfo to postgre failed, err:", err)
-		return
+		return err
 	}
 	fmt.Printf("Inserted a single record with ID: %d\n", id)
+	return nil
 }
 
-// func downloadApk(gameInfo *GameInfo) {
-
-// }
-
 // 处理消息，下载apk并且将数据存放到 mongo & pg
-func processMessage(msg []byte) error {
+func processMessage(msg []byte, workerLimitChan chan struct{}, wg *sync.WaitGroup) {
+	defer func() {
+		wg.Done()
+		<-workerLimitChan
+	}()
 	gameInfo := &GameInfo{}
 	if err := json.Unmarshal(msg, gameInfo); err != nil {
 		log.Printf("Error occurred while unmarshaling JSON: %v", err)
-		return err
+		return
 	}
-	storeMongoDB(gameInfo)
-	storePostgre(gameInfo)
-	// downloadApk(gameInfo)
-	return nil
+	if err := storeMongoDB(gameInfo); err != nil {
+		log.Printf("storeMongoDB failed, err:%v", err)
+		return
+	}
+	if err := storePostgre(gameInfo); err != nil {
+		log.Printf("storePostgre failed, err:%v", err)
+		return
+	}
 }
 
 // 接收消息
@@ -85,12 +92,22 @@ func receiveMsg() error {
 	}
 	defer partitionConsumer.Close()
 
+	// 限制10个协程
+	workerNum := 10
+	workerLimitChan := make(chan struct{}, workerNum)
+
+	wg := &sync.WaitGroup{}
+
 	for msg := range partitionConsumer.Messages() {
 		log.Printf("Consumed message offset %d\n", msg.Offset)
-		if err := processMessage(msg.Value); err != nil {
-			log.Println("processMessage failed, err:", err)
-		}
+		workerLimitChan <- struct{}{}
+		wg.Add(1)
+		go processMessage(msg.Value, workerLimitChan, wg)
+		// if err := processMessage(msg.Value); err != nil {
+		// 	log.Println("processMessage failed, err:", err)
+		// }
 	}
+	wg.Wait()
 	return nil
 }
 
