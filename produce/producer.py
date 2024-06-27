@@ -15,8 +15,12 @@ google_play_game_url = 'https://play.google.com/store/games'
 apk_base_url = "https://d.apkpure.com/b/APK/"
 apk_path = "./apk"
 count = 0
-download_times = 1
-download_threads = []
+download_num = 3
+# 获取game详细信息的线程
+spider_threads = []
+# 控制共享资源变量
+lock = threading.Lock()
+download_url_list = []
 s = requests.Session()
 s.mount('http://', HTTPAdapter(max_retries=3))
 s.mount('https://', HTTPAdapter(max_retries=3))
@@ -56,8 +60,9 @@ def get_apk_url(pkg_name):
 
 def get_gameinfo(game_url, pkg_name):
     global count
-    global download_times
-    global download_threads
+    global download_num
+    global lock
+    global download_url_list
     try:
         r = s.get(game_url, headers=header,proxies=proxys)
         # 游戏详情的响应
@@ -77,7 +82,7 @@ def get_gameinfo(game_url, pkg_name):
         gameinfo["company"] = re.findall("<span>(.*?)</span>", str(company_soup[0]))[0]
         # 解析下载次数
         download_soup = soup1.find_all(name='div', attrs={"class": "ClM7O"})
-        gameinfo["download_times"] = re.findall(">(.*?)<", str(download_soup[0]))[0]
+        gameinfo["download_num"] = re.findall(">(.*?)<", str(download_soup[0]))[0]
         # 解析游戏简介
         desc_soup = soup1.find_all(name='div', attrs={"class": "bARER"})[0]
         gameinfo["description"] = desc_soup.text
@@ -85,11 +90,14 @@ def get_gameinfo(game_url, pkg_name):
         apk_url = get_apk_url(pkg_name)
         gameinfo["apk_url"] = apk_url
         count += 1
-        if download_times > 0:
-            t = threading.Thread(target=download_apk,args=(apk_url,game_name))
-            t.start()
-            download_threads.append(t)
-            download_times -= 1
+        
+        lock.acquire()
+        try: 
+            if download_num > 0:
+                download_num -= 1
+                download_url_list.append((apk_url, game_name))
+        finally:
+            lock.release()
     except Exception as e:
         print(e)
 
@@ -98,10 +106,11 @@ def get_gameinfo(game_url, pkg_name):
     send_msg(json_gameinfo)
     
 def download_apk(download_url,apk_name):
+    print(u"开始下载:%s.apk\n" % apk_name)
     r = s.get(url=download_url, headers=download_header,proxies=proxys)
 
     f_path = os.path.join(apk_path,apk_name+".apk")
-
+    
     with open(f_path, 'wb') as writer:
         writer.write(r.content)
 
@@ -123,9 +132,25 @@ if __name__ == '__main__':
         pkg_name = re.findall("id=(.*?)$", game_detail_url)[0]
         # 去重
         print(f"开始爬取,url:{game_detail_url} ,apk包名:{pkg_name}")
-        # 通过游戏url查询详情获取gameinfo
-        get_gameinfo(game_detail_url, pkg_name)
+        # 并发通过游戏url查询详情获取gameinfo
+        t = threading.Thread(target=get_gameinfo,args=(game_detail_url,pkg_name))
+        spider_threads.append(t)
+        t.start()
+        # get_gameinfo(game_detail_url, pkg_name)
 
+    
+    for t in spider_threads:
+        t.join()
+        
+    # print(download_url_list)
+    # 并发执行下载任务
+    download_threads = []
+    for game_download_info in download_url_list:
+        t = threading.Thread(target=download_apk,args=(game_download_info[0],game_download_info[1]))
+        t.start()
+        download_threads.append(t)
+    
     for t in download_threads:
         t.join()
+
     print(f"共{count}条数据")
